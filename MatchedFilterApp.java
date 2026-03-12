@@ -4,6 +4,7 @@ import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.util.Arrays;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -20,11 +21,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class MatchedFilterApp {
 
     // ── Parametreler ──────────────────────────────────────────────────────────
-    static final float  FS           = 44100f*1f;   // Örnekleme frekansı (Hz)
-    static final double T_CHIRP      = 0.1;      // Chirp süresi (saniye)
+    static final float  FS           = 44100f*4f;   // Örnekleme frekansı (Hz)
+    static final double T_CHIRP      = 0.02;      // Chirp süresi (saniye)
     static final double T_PRI        = 0.3;      // PRI süresi (saniye) — chirp + yankı payı
-    static final double F0           = 2000.0;    // Başlangıç frekansı (Hz)
-    static final double F1           = 10000.0;   // Bitiş frekansı (Hz)
+    static final double F0           = 6000.0;    // Başlangıç frekansı (Hz)
+    static final double F1           = 8000.0;   // Bitiş frekansı (Hz)
     static final int    N_CHIRP      = (int)(FS * T_CHIRP);
     static final int    N_PRI_REC    = (int)(FS * T_PRI);   // kayıt örnek sayısı
 
@@ -415,6 +416,12 @@ public class MatchedFilterApp {
         for (int i = 0; i < n; i++) {
             double t = i / (double) fs;
             g[i] = Math.sin(2.0 * Math.PI * (f0 + 0.5 * k * t) * t);
+            
+            double w = 1.0;
+            double a = -0.5;
+            double b = 0.1;
+            double x = i/(n-1.0);
+            g[i] *= Math.pow(Math.exp(-Math.pow((x+a)/b/w, 2)), 0.2);
         }
         return g;
     }
@@ -474,7 +481,7 @@ public class MatchedFilterApp {
     //   - Enerji FFT'den SONRA hesaplanıyor (Parseval doğru uygulaması)
     //   - Geri oynatma kaldırıldı
     // =========================================================================
-    static double[] matchedFilter(double[] f, double[] g) {
+    static double[] matchedFilter2(double[] f, double[] g) {
         int n       = f.length;
         int fftSize = nextPow2(n);
 
@@ -483,6 +490,17 @@ public class MatchedFilterApp {
         double[] gReal = Arrays.copyOf(g, fftSize);
         double[] gImag = new double[fftSize];
 
+
+        // gain
+//        for (int i = 0; i < fftSize; i++) {
+//        	double t = i/FS * 5; 
+//        	double gain = Math.exp(t);
+//        	fReal[i] = fReal[i]*gain;
+//        }
+
+        fft(fReal, fImag, false);
+        fft(gReal, gImag, false);
+       
         double energyF = 0, energyG = 0;
         for (int i = 0; i < fftSize; i++) {
             energyF += fReal[i]*fReal[i] + fImag[i]*fImag[i];
@@ -492,8 +510,6 @@ public class MatchedFilterApp {
         double denom = Math.sqrt(energyF * energyG);
         if (denom == 0) denom = 1;
 
-        fft(fReal, fImag, false);
-        fft(gReal, gImag, false);
 
         
         double[] prodReal = new double[fftSize];
@@ -518,6 +534,85 @@ public class MatchedFilterApp {
             result[i] = 20.0 * Math.log10(linear[i] + EPSILON);
         }
         return result=linear;
+    }
+
+    
+    static double[] matchedFilter(double[] f, double[] g) {
+        int n = f.length; // Sinyal uzunluğu
+        int m = g.length; // Chirp uzunluğu
+        
+        // FFT boyutu: Konvolüsyon teoremi için 2^k ve N+M-1'den büyük olmalı
+        int fftSize = nextPow2(n + m);
+
+        // --- 1. PAYDA: g sinyalinin sabit enerjisi ---
+        double gEnergy = 0;
+        for (double val : g) gEnergy += val * val;
+
+        // --- 2. PAY: Çapraz İlinti (FFT ile) ---
+        double[] f_re = Arrays.copyOf(f, fftSize); //pad(f, fftSize);
+        double[] f_im = new double[fftSize];
+        //double[] g_re = pad(reverse(g), fftSize); // Correlation için g ters çevrilir
+        double[] g_re = Arrays.copyOf(g, fftSize); 
+        double[] g_im = new double[fftSize];
+
+        fft(f_re, f_im, false);
+        fft(g_re, g_im, false);
+        
+        for (int i = 0; i < fftSize; i++) {
+        	// reverse g_im[i] = -g_im[i];
+        }
+        
+        // Frekans uzayında çarpım (Complex multiplication)
+        double[] corr_re = new double[fftSize];
+        double[] corr_im = new double[fftSize];
+        for (int i = 0; i < fftSize; i++) {
+            corr_re[i] = f_re[i] * g_re[i] - f_im[i] * g_im[i];
+            corr_im[i] = f_re[i] * g_im[i] + f_im[i] * g_re[i];
+        }
+        
+        fft(corr_re, corr_im, true); // Pay hazır (Numerators)
+
+        // --- 3. PAYDA: f sinyalinin hareketli enerjisi ---
+        // f(a)^2 dizisini oluştur
+        double[] f_sq_re = new double[fftSize];
+        for (int i = 0; i < n; i++) f_sq_re[i] = f[i] * f[i];
+        double[] f_sq_im = new double[fftSize];
+
+        // Birlerle dolu pencere (n uzunluğunda)
+        double[] win_re = new double[fftSize];
+        for (int i = 0; i < m; i++) win_re[i] = 1.0;
+        double[] win_im = new double[fftSize];
+
+        fft(f_sq_re, f_sq_im, false);
+        fft(win_re, win_im, false);
+
+        // Frekans uzayında çarpım
+        double[] movingEnergy_re = new double[fftSize];
+        double[] movingEnergy_im = new double[fftSize];
+        for (int i = 0; i < fftSize; i++) {
+            movingEnergy_re[i] = f_sq_re[i] * win_re[i] - f_sq_im[i] * win_im[i];
+            movingEnergy_im[i] = f_sq_re[i] * win_im[i] + f_sq_im[i] * win_re[i];
+        }
+        
+        fft(movingEnergy_re, movingEnergy_im, true); // Payda terimi hazır
+
+        // --- 4. BİRLEŞTİRME: p(x) ---
+        double[] p = new double[n]; // Sonuç dizisi
+        for (int i = 0; i < n; i++) {
+            double num = Math.pow(corr_re[i], 2);
+            double den = movingEnergy_re[i] * gEnergy;
+            
+            // Bölme hatasını (0) engellemek için küçük bir epsilon eklenebilir
+            p[i] = (den > 1e-12) ? num / den : 0;
+        }
+        
+        final double EPSILON = 1e-9;
+        double[] result = new double[n];
+        for (int i = 0; i < n; i++) {
+            result[i] = 20.0 * Math.log10(p[i] + EPSILON);
+        }
+        
+        return result;
     }
 
     // =========================================================================
