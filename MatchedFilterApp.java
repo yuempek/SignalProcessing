@@ -1,11 +1,25 @@
-import javax.sound.sampled.*;
-import javax.swing.*;
-import java.awt.*;
-import java.awt.event.*;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.FontMetrics;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseMotionAdapter;
 import java.awt.image.BufferedImage;
 import java.util.Arrays;
-import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.DataLine;
+import javax.sound.sampled.SourceDataLine;
+import javax.sound.sampled.TargetDataLine;
+import javax.swing.JFrame;
+import javax.swing.JPanel;
 
 /**
  * ╔══════════════════════════════════════════════════════════════════════╗
@@ -22,10 +36,10 @@ public class MatchedFilterApp {
 
     // ── Parametreler ──────────────────────────────────────────────────────────
     static final float  FS           = 44100f*4f;   // Örnekleme frekansı (Hz)
-    static final double T_CHIRP      = 0.02;      // Chirp süresi (saniye)
+    static final double T_CHIRP      = 0.1;      // Chirp süresi (saniye)
     static final double T_PRI        = 0.3;      // PRI süresi (saniye) — chirp + yankı payı
-    static final double F0           = 6000.0;    // Başlangıç frekansı (Hz)
-    static final double F1           = 8000.0;   // Bitiş frekansı (Hz)
+    static final double F0           = 1000.0;    // Başlangıç frekansı (Hz)
+    static final double F1           = 15000.0;   // Bitiş frekansı (Hz)
     static final int    N_CHIRP      = (int)(FS * T_CHIRP);
     static final int    N_PRI_REC    = (int)(FS * T_PRI);   // kayıt örnek sayısı
 
@@ -34,7 +48,7 @@ public class MatchedFilterApp {
 
     // Circular matrix boyutları
     static final int MATRIX_ROWS    = 200;   // kaç PRI saklanacak (dairesel)
-    static final int MATRIX_COLS    = 1024*4;  // her satırdaki görüntü sütunu
+    static final int MATRIX_COLS    = 1024*8;  // her satırdaki görüntü sütunu
 
     // ─────────────────────────────────────────────────────────────────────────
     public static void main(String[] args) throws Exception {
@@ -67,13 +81,16 @@ public class MatchedFilterApp {
     }
 
     // Hedef sütun: maxIdx bu indekse hizalanacak
-    static final int PEAK_TARGET_COL = 1;
+    static final int PEAK_TARGET_COL = MATRIX_COLS/3;
 
     // =========================================================================
     // PRI Döngüsü — sürekli çal → kaydet → filtrele → hizala → matrise yaz
     // =========================================================================
     static void priLoop(double[] g, float[][] matrix, int[] head,
                         WaterfallPanel panel, AtomicBoolean running) {
+    	
+    	double[] gListened = new double[g.length];
+    	
         int pri = 0;
         while (running.get()) {
             try {
@@ -85,17 +102,31 @@ public class MatchedFilterApp {
                 // Matched filter
                 double[] mf = matchedFilter(f, g);
 
+                // maxIdx bul
+                // DENENDi : chirp'un yakalandigi yerden itibaren kayit chirp olarak degerlendirildi
+                int maxIdx = 0;
+                for (int i = 1; i < mf.length; i++) 
+                	if (mf[i] > mf[maxIdx]) maxIdx = i;
+
+                for (int i = 1; i < gListened.length; i++) gListened[i] = 0.0;
+                
+                System.arraycopy(f, maxIdx, gListened, 0, Math.min(gListened.length, f.length - 1 - maxIdx));
+                
+                // for (int i = 0; i < gListened.length; i++) gListened[i] *= 1000.0;
+
+                // mf = matchedFilter(f, gListened);
+
                 // Downsample → MATRIX_COLS nokta
                 float[] row = downsample(mf, MATRIX_COLS);
 
                 // maxIdx bul
-                int maxIdx = 0;
+                int maxRowIdx = 0;
                 for (int i = 1; i < row.length; i++)
-                    if (row[i] > row[maxIdx]) maxIdx = i;
+                    if (row[i] > row[maxRowIdx]) maxRowIdx = i;
 
                 // maxIdx'i PEAK_TARGET_COL'a getirecek kadar kaydır
                 // shift > 0 → sağa kaydır (sola padding), shift < 0 → sola kaydır (sağa padding)
-                int shift = PEAK_TARGET_COL - maxIdx;
+                int shift = PEAK_TARGET_COL - maxRowIdx;
                 row = shiftWithPadding(row, shift);
 
                 // Circular matrix'e yaz
@@ -109,7 +140,7 @@ public class MatchedFilterApp {
                 long elapsed = System.currentTimeMillis() - t0;
                 pri++;
                 System.out.printf("PRI #%d tamamlandı — maxIdx=%d  shift=%d  elapsed=%d ms%n",
-                                  pri, maxIdx, shift, elapsed);
+                                  pri, maxRowIdx, shift, elapsed);
 
                 // PRI süresine tamamla (kalan zamanı bekle)
                 long wait = (long)(T_PRI * 1000) - elapsed;
@@ -417,9 +448,9 @@ public class MatchedFilterApp {
             double t = i / (double) fs;
             g[i] = Math.sin(2.0 * Math.PI * (f0 + 0.5 * k * t) * t);
             
-            double w = 1.0;
-            double a = -0.5;
-            double b = 0.1;
+            double w = 0.8;
+            double a = -0.5; //fix
+            double b = 0.1;  //fix
             double x = i/(n-1.0);
             g[i] *= Math.pow(Math.exp(-Math.pow((x+a)/b/w, 2)), 0.2);
         }
@@ -548,6 +579,7 @@ public class MatchedFilterApp {
         double gEnergy = 0;
         for (double val : g) gEnergy += val * val;
 
+        
         // --- 2. PAY: Çapraz İlinti (FFT ile) ---
         double[] f_re = Arrays.copyOf(f, fftSize); //pad(f, fftSize);
         double[] f_im = new double[fftSize];
@@ -555,11 +587,27 @@ public class MatchedFilterApp {
         double[] g_re = Arrays.copyOf(g, fftSize); 
         double[] g_im = new double[fftSize];
 
+        for (int i = 0; i < FS * 0.05; i++) {
+        	f_re[i] = 0;
+        }
+
+        for (int i = 0; i < fftSize; i++) {
+	    	double t = (i)/FS; 
+	    	double gain = Math.exp(t);
+	    	// gain = Math.pow(t, 2);
+	    	
+	    	double power = 0;
+			gain = Math.pow((Math.max(t, 0)/0.1)*power+1, 2);
+	    	
+			f_re[i] = f_re[i]*gain;
+	    }
+        
         fft(f_re, f_im, false);
         fft(g_re, g_im, false);
         
         for (int i = 0; i < fftSize; i++) {
-        	// reverse g_im[i] = -g_im[i];
+        	// reverse 
+        	g_im[i] = -g_im[i];
         }
         
         // Frekans uzayında çarpım (Complex multiplication)
@@ -609,7 +657,7 @@ public class MatchedFilterApp {
         final double EPSILON = 1e-9;
         double[] result = new double[n];
         for (int i = 0; i < n; i++) {
-            result[i] = 20.0 * Math.log10(p[i] + EPSILON);
+            result[i] = 20*Math.log10(p[i]+EPSILON+0.001);
         }
         
         return result;
